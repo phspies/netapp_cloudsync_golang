@@ -1,1 +1,1 @@
-# netapp_cloudsync_golang
+GoLang example of how to consume the NetApp CloudSync API.

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -15,51 +16,60 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/kataras/tablewriter"
-	"github.com/landoop/tableprinter"
+	"github.com/mohae/struct2csv"
 	"golang.org/x/crypto/ssh/terminal"
 )
 
-var authResponse AuthenticateResponseType
+var authResponse authenticateResponseType
 
 func main() {
 
 	var userName, password string
-	userName = ""
-	password = ""
+	userName = "awswaldenproductionaccount@laureate.net"
+	password = "<password>"
 
 	login(userName, password)
-	printer := tableprinter.New(os.Stdout)
-	printer.BorderTop, printer.BorderBottom, printer.BorderLeft, printer.BorderRight = true, true, true, true
-	printer.CenterSeparator = "│"
-	printer.ColumnSeparator = "│"
-	printer.RowSeparator = "─"
-	printer.HeaderBgColor = tablewriter.BgBlackColor
-	printer.HeaderFgColor = tablewriter.FgGreenColor
-	for {
-		listResp := listRelationships()
-		fmt.Printf("Relationships: %v\n", len(listResp))
-		var tableRows []relTable
-		for _, rel := range listResp {
+	listResp := listTimeLines()
+	fmt.Printf("Timelines: %v\n", len(listResp))
+	var tableRows []relTable
+	for _, rel := range listResp {
+		if rel.Status != "ACTIVE" && rel.Relationship.Activity.ExecutionTime > 0 {
 			tableRows = append(tableRows,
 				relTable{
-					Source:    rel.Source.Nfs.Host + ":" + rel.Source.Nfs.Export,
-					Target:    rel.Target.Nfs.Host + ":" + rel.Target.Nfs.Export,
-					StartTime: rel.Activity.StartTime,
-					StopTime:  time.Unix(rel.Activity.EndTime, 0),
-					Status:    rel.Activity.Status + " (" + strconv.FormatInt(rel.Activity.ExecutionTime, 10) + ")",
-					CountS:    strconv.FormatInt(rel.Activity.FilesCopied, 10) + " out of " + strconv.FormatInt(rel.Activity.FilesMarkedForCopy, 10),
-					SizeS:     strconv.FormatInt(rel.Activity.BytesCopied, 10) + " out of " + strconv.FormatInt(rel.Activity.BytesCopied, 10),
+					Status:    rel.Status,
+					Source:    rel.Relationship.Source.Nfs.Host + ":" + rel.Relationship.Source.Nfs.Export,
+					Target:    rel.Relationship.Target.Nfs.Host + ":" + rel.Relationship.Target.Nfs.Export,
+					StartTime: fmt.Sprint("", rel.Relationship.Activity.StartTime.Format("02/01/2006 15:04:05")),
+					StopTime:  fmt.Sprint("", rel.Relationship.Activity.EndTime.Format("02/01/2006 15:04:05")),
+					Duration:  fmtDuration(rel.Relationship.Activity.EndTime.Sub(rel.Relationship.Activity.StartTime)),
+					CountS:    strconv.FormatInt(rel.Relationship.Activity.FilesCopied, 10),
+					SizeS:     strconv.FormatInt(rel.Relationship.Activity.BytesCopied/1024/1024, 10),
 				})
+		} else {
+
 		}
-		printer.Print(tableRows)
-		time.Sleep(time.Second * 10)
 	}
-	os.Exit(0)
+	enc := struct2csv.New()
+	rows, _ := enc.Marshal(tableRows)
+	csvfile, err := os.Create("output.csv")
+
+	if err != nil {
+		log.Fatalf("failed creating file: %s", err)
+	}
+
+	csvwriter := csv.NewWriter(csvfile)
+
+	for _, row := range rows {
+		_ = csvwriter.Write(row)
+	}
+
+	csvwriter.Flush()
+
+	csvfile.Close()
 }
-func listRelationships() (relResponeV2 ListV2Type) {
+func listTimeLines() timelineType {
 	client := &http.Client{}
-	req, err := http.NewRequest("GET", "https://cloudsync.netapp.com/api/relationships-v2", nil)
+	req, err := http.NewRequest("GET", "https://cloudsync.netapp.com/api/timelines-v2", nil)
 	req.Header.Add("Authorization", "Bearer "+authResponse.AccessToken)
 	req.Header.Add("Accept", "application/json")
 	resp, err := client.Do(req)
@@ -70,6 +80,7 @@ func listRelationships() (relResponeV2 ListV2Type) {
 	if readErr != nil {
 		log.Fatal(readErr)
 	}
+	var relResponeV2 timelineType
 	json.Unmarshal(body, &relResponeV2)
 	return relResponeV2
 }
@@ -88,14 +99,20 @@ func login(username string, password string) {
 		log.Fatalln(err)
 	}
 	resp, err := http.Post("https://netapp-cloud-account.auth0.com/oauth/token", "application/json", bytes.NewBuffer(bytesRepresentation))
-	if err != nil {
-		log.Fatalln(err)
+	if err != nil || resp.StatusCode != 200 {
+		log.Fatalln(resp)
 	}
+
 	body, readErr := ioutil.ReadAll(resp.Body)
 	if readErr != nil {
 		log.Fatal(readErr)
 	}
 	json.Unmarshal(body, &authResponse)
+}
+func checkError(message string, err error) {
+	if err != nil {
+		log.Fatal(message, err)
+	}
 }
 func credentials() (string, string) {
 	reader := bufio.NewReader(os.Stdin)
@@ -113,171 +130,107 @@ func credentials() (string, string) {
 	return strings.TrimSpace(username), strings.TrimSpace(password)
 }
 
-type AuthenticateResponseType struct {
+func fmtDuration(d time.Duration) string {
+	d = d.Round(time.Minute)
+	h := d / time.Hour
+	d -= h * time.Hour
+	m := d / time.Minute
+	return fmt.Sprintf("%02d:%02d", h, m)
+}
+
+type authenticateResponseType struct {
 	AccessToken string `json:"access_token"`
 	Scope       string `json:"scope"`
 	ExpiresIn   int    `json:"expires_in"`
 	TokenType   string `json:"token_type"`
 }
 type relTable struct {
-	Source    string    `header:"Source"`
-	Target    string    `header:"Target"`
-	Status    string    `header:"Status"`
-	StartTime time.Time `header:"StartTime"`
-	StopTime  time.Time `header:"StopTime"`
-	Duration  time.Time `header:"Duration"`
-	CountS    string    `header:"Count"`
-	SizeS     string    `header:"Size"`
+	Status    string `csv:"Status"`
+	Source    string `csv:"Source"`
+	Target    string `csv:"Target"`
+	StartTime string `csv:"StartTime"`
+	StopTime  string `csv:"StopTime"`
+	Duration  string `csv:"Duration"`
+	CountS    string `csv:"Count"`
+	SizeS     string `csv:"Size"`
 }
-type ListV2Type []struct {
-	IsQstack bool   `json:"isQstack"`
-	IsCvo    bool   `json:"isCvo"`
-	Phase    string `json:"phase"`
-	Source   struct {
-		Protocol string `json:"protocol"`
-		Nfs      struct {
-			Host     string `json:"host"`
-			Export   string `json:"export"`
-			Path     string `json:"path"`
-			Version  string `json:"version"`
-			Provider string `json:"provider"`
-		} `json:"nfs"`
-	} `json:"source"`
-	Target struct {
-		Protocol string `json:"protocol"`
-		Nfs      struct {
-			Host     string `json:"host"`
-			Export   string `json:"export"`
-			Path     string `json:"path"`
-			Version  string `json:"version"`
-			Provider string `json:"provider"`
-		} `json:"nfs"`
-	} `json:"target"`
-	Sync struct {
-		InDays    int       `json:"inDays"`
-		InHours   int       `json:"inHours"`
-		InMinutes int       `json:"inMinutes"`
-		AutoSync  string    `json:"autoSync"`
-		NextTime  time.Time `json:"nextTime"`
-	} `json:"sync"`
-	Settings struct {
-		GracePeriod    int  `json:"gracePeriod"`
-		DeleteOnTarget bool `json:"deleteOnTarget"`
-		Retries        int  `json:"retries"`
-		Files          struct {
-			ExcludeExtensions []interface{} `json:"excludeExtensions"`
-			MaxSize           int64         `json:"maxSize"`
-			MinSize           int           `json:"minSize"`
-			MinDate           string        `json:"minDate"`
-			MaxDate           interface{}   `json:"maxDate"`
-		} `json:"files"`
-		FileTypes struct {
-			Files       bool `json:"files"`
-			Directories bool `json:"directories"`
-			Symlinks    bool `json:"symlinks"`
-		} `json:"fileTypes"`
-	} `json:"settings"`
+type timelineType []struct {
+	Status       string `json:"status"`
+	RequestID    string `json:"requestId"`
+	Relationship struct {
+		IsCvo  bool `json:"isCvo"`
+		Source struct {
+			Protocol string `json:"protocol"`
+			Nfs      struct {
+				Host     string `json:"host"`
+				Export   string `json:"export"`
+				Path     string `json:"path"`
+				Version  string `json:"version"`
+				Provider string `json:"provider"`
+			} `json:"nfs"`
+		} `json:"source"`
+		Target struct {
+			Protocol string `json:"protocol"`
+			Nfs      struct {
+				Host     string `json:"host"`
+				Export   string `json:"export"`
+				Path     string `json:"path"`
+				Version  string `json:"version"`
+				Provider string `json:"provider"`
+			} `json:"nfs"`
+		} `json:"target"`
+		IsQstack       bool   `json:"isQstack"`
+		RelationshipID string `json:"relationshipId"`
+		Group          string `json:"group"`
+		DataBrokerID   string `json:"dataBrokerId"`
+		Activity       struct {
+			Type                 string    `json:"type"`
+			Status               string    `json:"status"`
+			FailureMessage       string    `json:"failureMessage"`
+			ExecutionTime        int64     `json:"executionTime"`
+			StartTime            time.Time `json:"startTime"`
+			EndTime              time.Time `json:"endTime"`
+			BytesMarkedForCopy   int64     `json:"bytesMarkedForCopy"`
+			FilesMarkedForCopy   int64     `json:"filesMarkedForCopy"`
+			DirsMarkedForCopy    int64     `json:"dirsMarkedForCopy"`
+			FilesCopied          int64     `json:"filesCopied"`
+			BytesCopied          int64     `json:"bytesCopied"`
+			DirsCopied           int64     `json:"dirsCopied"`
+			FilesFailed          int64     `json:"filesFailed"`
+			BytesFailed          int64     `json:"bytesFailed"`
+			DirsFailed           int64     `json:"dirsFailed"`
+			FilesMarkedforRemove int64     `json:"filesMarkedforRemove"`
+			BytesMarkedForRemove int64     `json:"bytesMarkedForRemove"`
+			DirsMarkedForRemove  int64     `json:"dirsMarkedForRemove"`
+			FilesRemoved         int64     `json:"filesRemoved"`
+			BytesRemoved         int64     `json:"bytesRemoved"`
+			DirsRemoved          int64     `json:"dirsRemoved"`
+			BytesRemovedFailed   int64     `json:"bytesRemovedFailed"`
+			FilesRemovedFailed   int64     `json:"filesRemovedFailed"`
+			FilesMarkedForGrace  int64     `json:"filesMarkedForGrace"`
+			BytesMarkedForGrace  int64     `json:"bytesMarkedForGrace"`
+			DirsMarkedForGrace   int64     `json:"dirsMarkedForGrace"`
+			FilesMarkedForIgnore int64     `json:"filesMarkedForIgnore"`
+			DirsScanned          int64     `json:"dirsScanned"`
+			FilesScanned         int64     `json:"filesScanned"`
+			DirsFailedToScan     int64     `json:"dirsFailedToScan"`
+			BytesScanned         int64     `json:"bytesScanned"`
+			Progress             int64     `json:"progress"`
+			LastMessageTime      time.Time `json:"lastMessageTime"`
+		} `json:"activity"`
+	} `json:"relationship,omitempty"`
 	DataBroker struct {
-		LastPing struct {
-			Wasabi int64 `json:"wasabi"`
-		} `json:"lastPing"`
-		Type             string  `json:"type"`
-		Name             string  `json:"name"`
-		GroupID          string  `json:"groupId"`
-		CreatedAt        int64   `json:"createdAt"`
-		TransferRate     float64 `json:"transferRate"`
-		UpdateNewVersion bool    `json:"updateNewVersion"`
-		ID               string  `json:"id"`
-		Placement        struct {
-			Hostname      string `json:"hostname"`
-			Platform      string `json:"platform"`
-			PrivateIP     string `json:"privateIp"`
-			Version       string `json:"version"`
-			Os            string `json:"os"`
-			Release       string `json:"release"`
-			OsTotalMem    string `json:"osTotalMem"`
-			Node          string `json:"node"`
-			Cpus          string `json:"cpus"`
-			ProcessMaxMem string `json:"processMaxMem"`
-		} `json:"placement"`
-		Status   string `json:"status"`
-		FileLink string `json:"fileLink"`
-	} `json:"dataBroker"`
+		Name         string `json:"name"`
+		DataBrokerID string `json:"dataBrokerId"`
+	} `json:"dataBroker,omitempty"`
 	Group struct {
-		DataBrokers []struct {
-			LastPing struct {
-				Wasabi int64 `json:"wasabi"`
-			} `json:"lastPing"`
-			Type             string  `json:"type"`
-			Name             string  `json:"name"`
-			GroupID          string  `json:"groupId"`
-			CreatedAt        int64   `json:"createdAt"`
-			TransferRate     float64 `json:"transferRate"`
-			UpdateNewVersion bool    `json:"updateNewVersion"`
-			ID               string  `json:"id"`
-			Placement        struct {
-				Hostname      string `json:"hostname"`
-				Platform      string `json:"platform"`
-				PrivateIP     string `json:"privateIp"`
-				Version       string `json:"version"`
-				Os            string `json:"os"`
-				Release       string `json:"release"`
-				OsTotalMem    string `json:"osTotalMem"`
-				Node          string `json:"node"`
-				Cpus          string `json:"cpus"`
-				ProcessMaxMem string `json:"processMaxMem"`
-			} `json:"placement"`
-			Status   string `json:"status"`
-			FileLink string `json:"fileLink"`
-			Message  string `json:"message,omitempty"`
-		} `json:"dataBrokers"`
-		Name      string    `json:"name"`
-		CreatedAt time.Time `json:"createdAt"`
-		ID        string    `json:"id"`
-	} `json:"group"`
-	StartTime        time.Time `json:"startTime"`
-	CreatedAt        int64     `json:"createdAt"`
-	ScannerQueue     string    `json:"scannerQueue,omitempty"`
-	TransferrerQueue string    `json:"transferrerQueue,omitempty"`
-	AutoSync         string    `json:"autoSync"`
-	ID               string    `json:"id"`
-	RelationshipID   string    `json:"relationshipId"`
-	Activity         struct {
-		Type                 string    `json:"type"`
-		Status               string    `json:"status"`
-		FailureMessage       string    `json:"failureMessage"`
-		ExecutionTime        int64     `json:"executionTime"`
-		StartTime            time.Time `json:"startTime"`
-		EndTime              int64     `json:"endTime"`
-		BytesMarkedForCopy   int64     `json:"bytesMarkedForCopy"`
-		FilesMarkedForCopy   int64     `json:"filesMarkedForCopy"`
-		DirsMarkedForCopy    int64     `json:"dirsMarkedForCopy"`
-		FilesCopied          int64     `json:"filesCopied"`
-		BytesCopied          int64     `json:"bytesCopied"`
-		DirsCopied           int64     `json:"dirsCopied"`
-		FilesFailed          int64     `json:"filesFailed"`
-		BytesFailed          int64     `json:"bytesFailed"`
-		DirsFailed           int64     `json:"dirsFailed"`
-		FilesMarkedforRemove int64     `json:"filesMarkedforRemove"`
-		BytesMarkedForRemove int64     `json:"bytesMarkedForRemove"`
-		DirsMarkedForRemove  int64     `json:"dirsMarkedForRemove"`
-		FilesRemoved         int64     `json:"filesRemoved"`
-		BytesRemoved         int64     `json:"bytesRemoved"`
-		DirsRemoved          int64     `json:"dirsRemoved"`
-		BytesRemovedFailed   int64     `json:"bytesRemovedFailed"`
-		FilesRemovedFailed   int64     `json:"filesRemovedFailed"`
-		FilesMarkedForGrace  int64     `json:"filesMarkedForGrace"`
-		BytesMarkedForGrace  int64     `json:"bytesMarkedForGrace"`
-		DirsMarkedForGrace   int64     `json:"dirsMarkedForGrace"`
-		FilesMarkedForIgnore int64     `json:"filesMarkedForIgnore"`
-		DirsScanned          int64     `json:"dirsScanned"`
-		FilesScanned         int64     `json:"filesScanned"`
-		DirsFailedToScan     int64     `json:"dirsFailedToScan"`
-		BytesScanned         int64     `json:"bytesScanned"`
-		Progress             int64     `json:"progress"`
-		LastMessageTime      time.Time `json:"lastMessageTime"`
-	} `json:"activity"`
-	EndTime time.Time `json:"endTime,omitempty"`
+		Name    string `json:"name"`
+		GroupID string `json:"groupId"`
+	} `json:"group,omitempty"`
+	Summary        string `json:"summary"`
+	CreatedAt      int64  `json:"createdAt"`
+	FailureMessage string `json:"failureMessage,omitempty"`
+	ID             string `json:"id"`
 }
 
 func plural(count int, singular string) (result string) {
